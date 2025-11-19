@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "environmentName": {
+      "value": "netlab"
+    },
+    "vmAdminUsername": {
+      "value": "azureuser"
+    },
+    "vmAdminPassword": {
+      "value": "GEN-PASSWORD"
+    },
+    "appServicePlanSku": {
+      "value": "S1"
+    },
+    "vmSize": {
+      "value": "Standard_D2s_v3"
+    }
+  }
+}

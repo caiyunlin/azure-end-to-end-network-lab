@@ -1,0 +1,43 @@
+# .gitignore for Azure Networking Lab
+
+# Azure deployment artifacts
+*.log
+*.tmp
+deployment-outputs.json
+
+# PowerShell artifacts
+*.ps1.bak
+
+# Bash artifacts
+*.sh.bak
+
+# Local environment files
+.env
+.env.local
+*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Parameters files with secrets (if customized)
+azuredeploy.parameters.local.json
+
+# Terraform state files (if added later)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Azure CLI cache
+.azure/
+
+# Windows thumbnail cache
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup

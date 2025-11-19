@@ -1,0 +1,730 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    },
+    "environmentName": {
+      "type": "string",
+      "defaultValue": "netlab",
+      "metadata": {
+        "description": "Environment name prefix for all resources"
+      }
+    },
+    "vmAdminUsername": {
+      "type": "string",
+      "defaultValue": "azureuser",
+      "metadata": {
+        "description": "Admin username for the Virtual Machine"
+      }
+    },
+    "vmAdminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Admin password for the Virtual Machine"
+      }
+    },
+    "appServicePlanSku": {
+      "type": "string",
+      "defaultValue": "S1",
+      "allowedValues": [
+        "S1",
+        "S2",
+        "S3",
+        "P1v2",
+        "P2v2",
+        "P3v2"
+      ],
+      "metadata": {
+        "description": "The SKU of the App Service Plan"
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D2s_v3",
+      "metadata": {
+        "description": "Size of the Virtual Machine"
+      }
+    }
+  },
+  "variables": {
+    "vnetName": "[concat(parameters('environmentName'), '-vnet')]",
+    "vnetAddressPrefix": "10.0.0.0/16",
+    "appGatewaySubnetName": "AppGatewaySubnet",
+    "appGatewaySubnetPrefix": "10.0.1.0/24",
+    "firewallSubnetName": "AzureFirewallSubnet",
+    "firewallSubnetPrefix": "10.0.2.0/24",
+    "vmSubnetName": "VMSubnet",
+    "vmSubnetPrefix": "10.0.3.0/24",
+    "appServiceSubnetName": "AppServiceSubnet",
+    "appServiceSubnetPrefix": "10.0.4.0/24",
+    "bastionSubnetName": "AzureBastionSubnet",
+    "bastionSubnetPrefix": "10.0.5.0/24",
+    "nsgName": "[concat(parameters('environmentName'), '-nsg')]",
+    "firewallName": "[concat(parameters('environmentName'), '-fw')]",
+    "firewallPublicIpName": "[concat(parameters('environmentName'), '-fw-pip')]",
+    "appGatewayName": "[concat(parameters('environmentName'), '-appgw')]",
+    "appGatewayPublicIpName": "[concat(parameters('environmentName'), '-appgw-pip')]",
+    "frontDoorName": "[concat(parameters('environmentName'), '-fd-', uniqueString(resourceGroup().id))]",
+    "appServicePlanName": "[concat(parameters('environmentName'), '-asp')]",
+    "appServiceName": "[concat(parameters('environmentName'), '-app-', uniqueString(resourceGroup().id))]",
+    "vmName": "[concat(parameters('environmentName'), '-vm')]",
+    "vmNicName": "[concat(parameters('environmentName'), '-vm-nic')]",
+    "vmPublicIpName": "[concat(parameters('environmentName'), '-vm-pip')]",
+    "bastionName": "[concat(parameters('environmentName'), '-bastion')]",
+    "bastionPublicIpName": "[concat(parameters('environmentName'), '-bastion-pip')]",
+    "routeTableName": "[concat(parameters('environmentName'), '-rt')]",
+    "logAnalyticsWorkspaceName": "[concat(parameters('environmentName'), '-law')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('nsgName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "Allow-GatewayManager",
+            "properties": {
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "65200-65535",
+              "sourceAddressPrefix": "GatewayManager",
+              "destinationAddressPrefix": "*",
+              "access": "Allow",
+              "priority": 100,
+              "direction": "Inbound"
+            }
+          },
+          {
+            "name": "Allow-HTTP",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "80",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*",
+              "access": "Allow",
+              "priority": 110,
+              "direction": "Inbound"
+            }
+          },
+          {
+            "name": "Allow-HTTPS",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "443",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*",
+              "access": "Allow",
+              "priority": 120,
+              "direction": "Inbound"
+            }
+          },
+          {
+            "name": "Allow-SSH",
+            "properties": {
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "22",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*",
+              "access": "Allow",
+              "priority": 130,
+              "direction": "Inbound"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/routeTables",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('routeTableName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "routes": [
+          {
+            "name": "to-firewall",
+            "properties": {
+              "addressPrefix": "0.0.0.0/0",
+              "nextHopType": "VirtualAppliance",
+              "nextHopIpAddress": "10.0.2.4"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]",
+        "[resourceId('Microsoft.Network/routeTables', variables('routeTableName'))]"
+      ],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[variables('vnetAddressPrefix')]"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('appGatewaySubnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('appGatewaySubnetPrefix')]",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+              }
+            }
+          },
+          {
+            "name": "[variables('firewallSubnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('firewallSubnetPrefix')]"
+            }
+          },
+          {
+            "name": "[variables('vmSubnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('vmSubnetPrefix')]",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+              },
+              "routeTable": {
+                "id": "[resourceId('Microsoft.Network/routeTables', variables('routeTableName'))]"
+              }
+            }
+          },
+          {
+            "name": "[variables('appServiceSubnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('appServiceSubnetPrefix')]",
+              "delegations": [
+                {
+                  "name": "delegation",
+                  "properties": {
+                    "serviceName": "Microsoft.Web/serverFarms"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "[variables('bastionSubnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('bastionSubnetPrefix')]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('firewallPublicIpName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4"
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('appGatewayPublicIpName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4"
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('vmPublicIpName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4"
+      }
+    },
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('bastionPublicIpName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "publicIPAddressVersion": "IPv4"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[variables('logAnalyticsWorkspaceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    {
+      "type": "Microsoft.Network/azureFirewalls",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('firewallName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('firewallPublicIpName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsWorkspaceName'))]"
+      ],
+      "properties": {
+        "sku": {
+          "name": "AZFW_VNet",
+          "tier": "Standard"
+        },
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('firewallSubnetName'))]"
+              },
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('firewallPublicIpName'))]"
+              }
+            }
+          }
+        ],
+        "applicationRuleCollections": [
+          {
+            "name": "AllowWeb",
+            "properties": {
+              "priority": 100,
+              "action": {
+                "type": "Allow"
+              },
+              "rules": [
+                {
+                  "name": "Allow-HTTP-HTTPS",
+                  "protocols": [
+                    {
+                      "protocolType": "Http",
+                      "port": 80
+                    },
+                    {
+                      "protocolType": "Https",
+                      "port": 443
+                    }
+                  ],
+                  "targetFqdns": [
+                    "*"
+                  ],
+                  "sourceAddresses": [
+                    "*"
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "networkRuleCollections": [
+          {
+            "name": "AllowAll",
+            "properties": {
+              "priority": 100,
+              "action": {
+                "type": "Allow"
+              },
+              "rules": [
+                {
+                  "name": "Allow-All",
+                  "protocols": [
+                    "Any"
+                  ],
+                  "sourceAddresses": [
+                    "*"
+                  ],
+                  "destinationAddresses": [
+                    "*"
+                  ],
+                  "destinationPorts": [
+                    "*"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/applicationGateways",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('appGatewayName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('appGatewayPublicIpName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.Web/sites', variables('appServiceName'))]"
+      ],
+      "properties": {
+        "sku": {
+          "name": "Standard_v2",
+          "tier": "Standard_v2",
+          "capacity": 2
+        },
+        "gatewayIPConfigurations": [
+          {
+            "name": "appGatewayIpConfig",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('appGatewaySubnetName'))]"
+              }
+            }
+          }
+        ],
+        "frontendIPConfigurations": [
+          {
+            "name": "appGatewayFrontendIP",
+            "properties": {
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('appGatewayPublicIpName'))]"
+              }
+            }
+          }
+        ],
+        "frontendPorts": [
+          {
+            "name": "port80",
+            "properties": {
+              "port": 80
+            }
+          }
+        ],
+        "backendAddressPools": [
+          {
+            "name": "appServiceBackendPool",
+            "properties": {
+              "backendAddresses": [
+                {
+                  "fqdn": "[reference(resourceId('Microsoft.Web/sites', variables('appServiceName'))).defaultHostName]"
+                }
+              ]
+            }
+          }
+        ],
+        "backendHttpSettingsCollection": [
+          {
+            "name": "appServiceBackendHttpSettings",
+            "properties": {
+              "port": 80,
+              "protocol": "Http",
+              "cookieBasedAffinity": "Disabled",
+              "pickHostNameFromBackendAddress": true,
+              "requestTimeout": 20
+            }
+          }
+        ],
+        "httpListeners": [
+          {
+            "name": "appGatewayHttpListener",
+            "properties": {
+              "frontendIPConfiguration": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/frontendIPConfigurations', variables('appGatewayName'), 'appGatewayFrontendIP')]"
+              },
+              "frontendPort": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/frontendPorts', variables('appGatewayName'), 'port80')]"
+              },
+              "protocol": "Http"
+            }
+          }
+        ],
+        "requestRoutingRules": [
+          {
+            "name": "rule1",
+            "properties": {
+              "ruleType": "Basic",
+              "priority": 100,
+              "httpListener": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/httpListeners', variables('appGatewayName'), 'appGatewayHttpListener')]"
+              },
+              "backendAddressPool": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/backendAddressPools', variables('appGatewayName'), 'appServiceBackendPool')]"
+              },
+              "backendHttpSettings": {
+                "id": "[resourceId('Microsoft.Network/applicationGateways/backendHttpSettingsCollection', variables('appGatewayName'), 'appServiceBackendHttpSettings')]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Web/serverfarms",
+      "apiVersion": "2023-01-01",
+      "name": "[variables('appServicePlanName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "[parameters('appServicePlanSku')]"
+      },
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.Web/sites",
+      "apiVersion": "2023-01-01",
+      "name": "[variables('appServiceName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ],
+      "properties": {
+        "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]",
+        "virtualNetworkSubnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('appServiceSubnetName'))]",
+        "siteConfig": {
+          "appSettings": [
+            {
+              "name": "WEBSITE_VNET_ROUTE_ALL",
+              "value": "1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('vmNicName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('vmPublicIpName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('vmSubnetName'))]"
+              },
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('vmPublicIpName'))]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-03-01",
+      "name": "[variables('vmName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', variables('vmNicName'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[variables('vmName')]",
+          "adminUsername": "[parameters('vmAdminUsername')]",
+          "adminPassword": "[parameters('vmAdminPassword')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "0001-com-ubuntu-server-jammy",
+            "sku": "22_04-lts-gen2",
+            "version": "latest"
+          },
+          "osDisk": {
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "Standard_LRS"
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('vmNicName'))]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Network/bastionHosts",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('bastionName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('bastionPublicIpName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ],
+      "sku": {
+        "name": "Basic"
+      },
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "bastionIpConfig",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('bastionSubnetName'))]"
+              },
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('bastionPublicIpName'))]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Cdn/profiles",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('frontDoorName')]",
+      "location": "Global",
+      "sku": {
+        "name": "Standard_AzureFrontDoor"
+      },
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.Cdn/profiles/afdEndpoints",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('frontDoorName'), '/', parameters('environmentName'), '-endpoint')]",
+      "location": "Global",
+      "dependsOn": [
+        "[resourceId('Microsoft.Cdn/profiles', variables('frontDoorName'))]"
+      ],
+      "properties": {
+        "enabledState": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Cdn/profiles/originGroups",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('frontDoorName'), '/appgw-origin-group')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Cdn/profiles', variables('frontDoorName'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('appGatewayPublicIpName'))]",
+        "[resourceId('Microsoft.Network/applicationGateways', variables('appGatewayName'))]"
+      ],
+      "properties": {
+        "loadBalancingSettings": {
+          "sampleSize": 4,
+          "successfulSamplesRequired": 3,
+          "additionalLatencyInMilliseconds": 50
+        },
+        "healthProbeSettings": {
+          "probePath": "/",
+          "probeRequestType": "HEAD",
+          "probeProtocol": "Http",
+          "probeIntervalInSeconds": 100
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Cdn/profiles/originGroups/origins",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('frontDoorName'), '/appgw-origin-group/appgw-origin')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Cdn/profiles/originGroups', variables('frontDoorName'), 'appgw-origin-group')]",
+        "[resourceId('Microsoft.Network/applicationGateways', variables('appGatewayName'))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('appGatewayPublicIpName'))]"
+      ],
+      "properties": {
+        "hostName": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('appGatewayPublicIpName')), '2023-05-01').ipAddress]",
+        "httpPort": 80,
+        "httpsPort": 443,
+        "originHostHeader": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('appGatewayPublicIpName')), '2023-05-01').ipAddress]",
+        "priority": 1,
+        "weight": 1000,
+        "enabledState": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Cdn/profiles/afdEndpoints/routes",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('frontDoorName'), '/', parameters('environmentName'), '-endpoint/default-route')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Cdn/profiles/afdEndpoints', variables('frontDoorName'), concat(parameters('environmentName'), '-endpoint'))]",
+        "[resourceId('Microsoft.Cdn/profiles/originGroups', variables('frontDoorName'), 'appgw-origin-group')]",
+        "[resourceId('Microsoft.Cdn/profiles/originGroups/origins', variables('frontDoorName'), 'appgw-origin-group', 'appgw-origin')]"
+      ],
+      "properties": {
+        "originGroup": {
+          "id": "[resourceId('Microsoft.Cdn/profiles/originGroups', variables('frontDoorName'), 'appgw-origin-group')]"
+        },
+        "supportedProtocols": [
+          "Http",
+          "Https"
+        ],
+        "patternsToMatch": [
+          "/*"
+        ],
+        "forwardingProtocol": "HttpOnly",
+        "linkToDefaultDomain": "Enabled",
+        "httpsRedirect": "Disabled",
+        "enabledState": "Enabled"
+      }
+    }
+  ],
+  "outputs": {
+    "frontDoorEndpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Cdn/profiles/afdEndpoints', variables('frontDoorName'), concat(parameters('environmentName'), '-endpoint'))).hostName]"
+    },
+    "appGatewayPublicIP": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('appGatewayPublicIpName'))).ipAddress]"
+    },
+    "firewallPublicIP": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('firewallPublicIpName'))).ipAddress]"
+    },
+    "appServiceHostName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Web/sites', variables('appServiceName'))).defaultHostName]"
+    },
+    "vmPublicIP": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('vmPublicIpName'))).ipAddress]"
+    },
+    "bastionHostName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/bastionHosts', variables('bastionName'))).dnsName]"
+    }
+  }
+}
